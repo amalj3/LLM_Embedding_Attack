@@ -226,10 +226,10 @@ def run(
                 if early_stopping:
                     break
 
-            logs.append({  # <--- NEW
+            logs.append({
                 "step": i,
                 "loss": loss.item(),
-                "norm": (embeddings_attack + adv_pert).norm(2, dim=2).item(),
+                "norm": (embeddings_attack + adv_pert).norm(2, dim=2).mean().item(),
                 "output": output_str,
                 "success": success
             })
