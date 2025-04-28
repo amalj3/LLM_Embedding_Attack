@@ -231,7 +231,7 @@ def run(
                 "loss": loss.item(),
                 "norm": (embeddings_attack + adv_pert).norm(2, dim=2).mean().item(),
                 "output": output_str,
-                "success": success
+                "success": sucess
             })
             
             if i % print_interval == 0 and i != 0:
