@@ -39,13 +39,14 @@ def load_model_and_tokenizer(model_path, tokenizer_path=None, device="cuda:0", *
 
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True, use_fast=False)
 
+    # Adjust special tokens for specific families
     if "oasst-sft-6-llama-30b" in tokenizer_path:
         tokenizer.bos_token_id = 1
         tokenizer.unk_token_id = 0
     if "guanaco" in tokenizer_path:
         tokenizer.eos_token_id = 2
         tokenizer.unk_token_id = 0
-    if "llama-2" in tokenizer_path:
+    if "llama" in tokenizer_path or "vicuna" in tokenizer_path or "mistral" in tokenizer_path:
         tokenizer.pad_token = tokenizer.unk_token
         tokenizer.padding_side = "left"
     if "falcon" in tokenizer_path:
