@@ -21,6 +21,7 @@ from transformers import (
     GPTJForCausalLM,
     GPTNeoXForCausalLM,
     LlamaForCausalLM,
+    MistralForCausalLM,
 )
 
 
