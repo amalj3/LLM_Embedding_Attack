@@ -60,7 +60,7 @@ def get_embedding_matrix(model):
     # from llm-attacks
     if isinstance(model, GPTJForCausalLM) or isinstance(model, GPT2LMHeadModel):
         return model.transformer.wte.weight
-    elif isinstance(model, LlamaForCausalLM) or isinstance(model, MistralForCausalLM):  # <-- Add this
+    elif isinstance(model, LlamaForCausalLM) or isinstance(model, MistralForCausalLM):
         return model.model.embed_tokens.weight
     elif isinstance(model, GPTNeoXForCausalLM):
         return model.base_model.embed_in.weight
