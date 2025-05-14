@@ -26,7 +26,6 @@ from transformers import (
 )
 
 def load_model_and_tokenizer(model_path, tokenizer_path=None, device="cuda:0", **kwargs):
-    # from llm-attacks
     model = (
         AutoModelForCausalLM.from_pretrained(
             model_path, torch_dtype=torch.float16, trust_remote_code=True, **kwargs
@@ -56,7 +55,6 @@ def load_model_and_tokenizer(model_path, tokenizer_path=None, device="cuda:0", *
     return model, tokenizer
 
 def get_embedding_matrix(model):
-    # from llm-attacks
     if isinstance(model, GPTJForCausalLM) or isinstance(model, GPT2LMHeadModel):
         return model.transformer.wte.weight
     elif isinstance(model, LlamaForCausalLM):
@@ -140,6 +138,7 @@ def run(
     total_steps = 0
     n = 0
     successful_attacks = 0
+    all_results = []  # NEW: collect all outputs
 
     for row in reader:
         fixed_prompt, target = row
@@ -153,6 +152,15 @@ def run(
         one_hot_inputs, embeddings = create_one_hot_and_embeddings(input_tokens, embed_weights, model)
         one_hot_attack, embeddings_attack = create_one_hot_and_embeddings(attack_tokens, embed_weights, model)
         one_hot_target, embeddings_target = create_one_hot_and_embeddings(target_tokens, embed_weights, model)
+
+        # NEW: Generate standard (non-attacked) response
+        with torch.no_grad():
+            full_embedding_standard = torch.hstack([embeddings, embeddings_attack])
+            standard_logits = model(inputs_embeds=full_embedding_standard).logits
+            standard_tokens = torch.argmax(standard_logits, dim=-1)
+            standard_output_str = tokenizer.decode(
+                standard_tokens[0][len(input_tokens):].cpu().numpy(), skip_special_tokens=True
+            )
 
         adv_pert = torch.zeros_like(embeddings_attack, requires_grad=True, device=device)
         for i in range(num_steps):
@@ -169,8 +177,8 @@ def run(
 
             tokens_pred = logits.argmax(2)
             output_str = tokenizer.decode(tokens_pred[0][3:].cpu().numpy())
-            sucess = output_str == target
-            if sucess:
+            success = output_str == target
+            if success:
                 successful_attacks += 1
                 if early_stopping:
                     break
@@ -197,13 +205,22 @@ def run(
             print(generated_text)
             print("============================================== ")
 
+        # NEW: Collect example-level result
+        all_results.append({
+            "fixed_prompt": fixed_prompt,
+            "target": target,
+            "standard_output": standard_output_str,
+            "final_output": output_str,
+            "successful_attack": success
+        })
+
         n += 1
         print(f"Successful attacks: {successful_attacks}/{n} \nAverage steps: {total_steps/n}")
 
     end_time = time.time()
     elapsed_time = end_time - start_time
 
-    # Save results
+    # Save summary
     result = {
         "model_path": model_path,
         "attack_type": "Embedding",
@@ -217,11 +234,17 @@ def run(
     save_dir = "/content/drive/MyDrive/CSE_481_Capstone/attack_logs"
     os.makedirs(save_dir, exist_ok=True)
     model_name = model_path.split("/")[-1]
-    filename = f"{save_dir}/{model_name}_embedding_attack_result.json"
-    with open(filename, "w") as f:
+
+    # Save summary
+    with open(f"{save_dir}/{model_name}_embedding_attack_result.json", "w") as f:
         json.dump(result, f, indent=4)
 
-    print(f"Results saved to {filename}")
+    # Save full responses
+    with open(f"{save_dir}/{model_name}_standard_vs_attacked_outputs.jsonl", "w") as f:
+        for entry in all_results:
+            f.write(json.dumps(entry) + "\n")
+
+    print(f"Results saved to {save_dir}")
 
 if __name__ == "__main__":
     run()
