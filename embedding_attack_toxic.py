@@ -1,13 +1,3 @@
-"""
-Inspired by the llm-attacks project: https://github.com/llm-attacks/llm-attacks
-
-Run:
-
-    python embedding_attack_submission.py --help
-
-for more information.
-"""
-
 import csv
 import torch
 import torch.nn as nn
@@ -26,7 +16,6 @@ from transformers import (
 
 
 def load_model_and_tokenizer(model_path, tokenizer_path=None, device="cuda:0", **kwargs):
-    # from llm-attacks
     model = (
         AutoModelForCausalLM.from_pretrained(
             model_path, torch_dtype=torch.float16, trust_remote_code=True, **kwargs
@@ -39,7 +28,6 @@ def load_model_and_tokenizer(model_path, tokenizer_path=None, device="cuda:0", *
 
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True, use_fast=False)
 
-    # Adjust special tokens for specific families
     if "oasst-sft-6-llama-30b" in tokenizer_path:
         tokenizer.bos_token_id = 1
         tokenizer.unk_token_id = 0
@@ -58,7 +46,6 @@ def load_model_and_tokenizer(model_path, tokenizer_path=None, device="cuda:0", *
 
 
 def get_embedding_matrix(model):
-    # from llm-attacks
     if isinstance(model, GPTJForCausalLM) or isinstance(model, GPT2LMHeadModel):
         return model.transformer.wte.weight
     elif isinstance(model, LlamaForCausalLM) or isinstance(model, MistralForCausalLM):
@@ -70,33 +57,17 @@ def get_embedding_matrix(model):
 
 
 def generate(model, input_embeddings, num_tokens=50):
-    # Set the model to evaluation mode
     model.eval()
     embedding_matrix = get_embedding_matrix(model)
     input_embeddings = input_embeddings.clone()
-
-    # Generate text using the input embeddings
     with torch.no_grad():
-        # Create a tensor to store the generated tokens
         generated_tokens = torch.tensor([], dtype=torch.long, device=model.device)
-
-        print("Generating...")
         for _ in tqdm.tqdm(range(num_tokens)):
-            # Generate text token by token
-            logits = model(input_ids=None, inputs_embeds=input_embeddings).logits  # , past_key_values=past)
-
-            # Get the last predicted token (greedy decoding)
+            logits = model(input_ids=None, inputs_embeds=input_embeddings).logits
             predicted_token = torch.argmax(logits[:, -1, :])
-
-            # Append the predicted token to the generated tokens
-            generated_tokens = torch.cat((generated_tokens, predicted_token.unsqueeze(0)))  # , dim=1)
-
-            # get embeddings from next generated one, and append it to input
+            generated_tokens = torch.cat((generated_tokens, predicted_token.unsqueeze(0)))
             predicted_embedding = embedding_matrix[predicted_token]
             input_embeddings = torch.hstack([input_embeddings, predicted_embedding[None, None, :]])
-
-        # Convert generated tokens to text using the tokenizer
-        # generated_text = tokenizer.decode(generated_tokens[0].tolist(), skip_special_tokens=True)
     return generated_tokens.cpu().numpy()
 
 
@@ -136,36 +107,9 @@ def run(
     load_dataset=True,
     verbose=False,
     early_stopping=True,
-    save_logs=False,     # <--- NEW
-    log_path=None,       # <--- NEW
+    save_logs=False,
+    log_path=None,
 ):
-    """
-    Embedding space attack on Llama2.
-
-    String will overall look like:
-
-        [fixed_prompt] + [control_prompt] + [target]
-
-                                                ^ target of optimization
-
-                                ^ control tokens optimized to maximize target.
-                                  genration begins at the end of these embeddings.
-
-              ^ a fixed prompt that will not get modified during optimization. Can
-                be used to provide a fixed context; matches the experimental setup
-                of Zou et al., 2023.
-
-    Args:
-        model_path (str): Path to your Llama-2-7b-chat-hf directory
-        num_steps (int): Number of gradient steps to take in the attack
-        fixed_prompt (str): Part of the prompt that won't be altered/have gradients backpropogated
-            to. You can specify an empty space i.e. fixed_prompt=' ' if you wish to only have a
-            controllabe prompt.
-        control_prompt (str): Part of the prompt that will be modified by gradient info. Generation
-            starts at the end of this string.
-        target (str): Optimization target; what the LLM will seek to generate immediately after
-            the control string.
-    """
     if seed is not None:
         torch.manual_seed(seed)
 
@@ -194,21 +138,16 @@ def run(
         control_prompt = control_prompt_init
         print(fixed_prompt, target)
 
-        # always appends a pad token at front; deal with it
         input_tokens = torch.tensor(tokenizer(fixed_prompt)["input_ids"], device=device)
         attack_tokens = torch.tensor(tokenizer(control_prompt)["input_ids"], device=device)[1:]
         target_tokens = torch.tensor(tokenizer(target)["input_ids"], device=device)[1:]
 
-        # inputs
         one_hot_inputs, embeddings = create_one_hot_and_embeddings(input_tokens, embed_weights, model)
-        # attack
         one_hot_attack, embeddings_attack = create_one_hot_and_embeddings(attack_tokens, embed_weights, model)
-        # one_hot_attack, embeddings_attack = one_hot_attack[1:], embeddings_attack[1:]
-        # targets
         one_hot_target, embeddings_target = create_one_hot_and_embeddings(target_tokens, embed_weights, model)
-        # one_hot_target, embeddings_target = one_hot_target[1:], embeddings_target[1:]
 
         adv_pert = torch.zeros_like(embeddings_attack, requires_grad=True, device=device)
+
         for i in range(num_steps):
             total_steps += 1
             loss, logits = calc_loss(
@@ -223,8 +162,8 @@ def run(
 
             tokens_pred = logits.argmax(2)
             output_str = tokenizer.decode(tokens_pred[0][3:].cpu().numpy())
-            sucess = output_str == target
-            if sucess:
+            success = output_str == target
+            if success:
                 successful_attacks += 1
                 if early_stopping:
                     break
@@ -234,9 +173,9 @@ def run(
                 "loss": loss.item(),
                 "norm": (embeddings_attack + adv_pert).norm(2, dim=2).mean().item(),
                 "output": output_str,
-                "success": sucess
+                "success": success
             })
-            
+
             if i % print_interval == 0 and i != 0:
                 print(f"Iter: {i}")
                 print(f"loss: {loss}")
@@ -259,14 +198,27 @@ def run(
             print(generated_text)
             print("============================================== ")
 
+        # ADDED: Generate output from the original toxic prompt without attack
+        original_input_ids = tokenizer.encode(fixed_prompt + " " + target, return_tensors="pt").to(device)
+        with torch.no_grad():
+            original_output_ids = model.generate(original_input_ids, max_length=original_input_ids.shape[1] + 100)
+        original_output = tokenizer.decode(original_output_ids[0], skip_special_tokens=True)
+
+        # ADDED: Log both outputs
+        logs[-1].update({
+            "adversarial_output": generated_text,
+            "original_prompt_output": original_output
+        })
+
         n += 1
         print(f"Successful attacks: {successful_attacks}/{n} \nAverage steps: {total_steps/n}")
-        
+
     if save_logs and log_path is not None:
         with open(log_path, "w") as f:
             json.dump(logs, f, indent=2)
 
-    return logs  # <--- NEW
+    return logs
+
 
 if __name__ == "__main__":
     run()
