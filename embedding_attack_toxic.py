@@ -190,10 +190,12 @@ def run(
                 print(generated_text)
                 print("============================================== ")
 
+        # Always generate adversarial output
+        full_embedding = torch.hstack([embeddings, embeddings_attack + adv_pert])
+        generated_tokens = generate(model, full_embedding, num_tokens)
+        generated_text = tokenizer.decode(generated_tokens, skip_special_tokens=True)
+        
         if verbose:
-            full_embedding = torch.hstack([embeddings, embeddings_attack + adv_pert])
-            generated_tokens = generate(model, full_embedding, num_tokens)
-            generated_text = tokenizer.decode(generated_tokens, skip_special_tokens=True)
             print("================== FINAL =====================")
             print(generated_text)
             print("============================================== ")
