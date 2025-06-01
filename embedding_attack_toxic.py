@@ -1,97 +1,3 @@
-import csv
-import torch
-import torch.nn as nn
-import tqdm
-import json
-
-from transformers import (
-    AutoModelForCausalLM,
-    AutoTokenizer,
-    GPT2LMHeadModel,
-    GPTJForCausalLM,
-    GPTNeoXForCausalLM,
-    LlamaForCausalLM,
-    MistralForCausalLM,
-)
-
-
-def load_model_and_tokenizer(model_path, tokenizer_path=None, device="cuda:0", **kwargs):
-    model = (
-        AutoModelForCausalLM.from_pretrained(
-            model_path, torch_dtype=torch.float16, trust_remote_code=True, **kwargs
-        )
-        .to(device)
-        .eval()
-    )
-
-    tokenizer_path = model_path if tokenizer_path is None else tokenizer_path
-
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True, use_fast=False)
-
-    if "oasst-sft-6-llama-30b" in tokenizer_path:
-        tokenizer.bos_token_id = 1
-        tokenizer.unk_token_id = 0
-    if "guanaco" in tokenizer_path:
-        tokenizer.eos_token_id = 2
-        tokenizer.unk_token_id = 0
-    if "llama" in tokenizer_path or "vicuna" in tokenizer_path or "mistral" in tokenizer_path:
-        tokenizer.pad_token = tokenizer.unk_token
-        tokenizer.padding_side = "left"
-    if "falcon" in tokenizer_path:
-        tokenizer.padding_side = "left"
-    if not tokenizer.pad_token:
-        tokenizer.pad_token = tokenizer.eos_token
-
-    return model, tokenizer
-
-
-def get_embedding_matrix(model):
-    if isinstance(model, GPTJForCausalLM) or isinstance(model, GPT2LMHeadModel):
-        return model.transformer.wte.weight
-    elif isinstance(model, LlamaForCausalLM) or isinstance(model, MistralForCausalLM):
-        return model.model.embed_tokens.weight
-    elif isinstance(model, GPTNeoXForCausalLM):
-        return model.base_model.embed_in.weight
-    else:
-        raise ValueError(f"Unknown model type: {type(model)}")
-
-
-def generate(model, input_embeddings, num_tokens=50):
-    model.eval()
-    embedding_matrix = get_embedding_matrix(model)
-    input_embeddings = input_embeddings.clone()
-    with torch.no_grad():
-        generated_tokens = torch.tensor([], dtype=torch.long, device=model.device)
-        for _ in tqdm.tqdm(range(num_tokens)):
-            logits = model(input_ids=None, inputs_embeds=input_embeddings).logits
-            predicted_token = torch.argmax(logits[:, -1, :])
-            generated_tokens = torch.cat((generated_tokens, predicted_token.unsqueeze(0)))
-            predicted_embedding = embedding_matrix[predicted_token]
-            input_embeddings = torch.hstack([input_embeddings, predicted_embedding[None, None, :]])
-    return generated_tokens.cpu().numpy()
-
-
-def calc_loss(model, embeddings, embeddings_attack, embeddings_target, targets):
-    full_embeddings = torch.hstack([embeddings, embeddings_attack, embeddings_target])
-    logits = model(inputs_embeds=full_embeddings).logits
-    loss_slice_start = len(embeddings[0]) + len(embeddings_attack[0])
-    loss = nn.CrossEntropyLoss()(logits[0, loss_slice_start - 1 : -1, :], targets)
-    return loss, logits[:, loss_slice_start - 4 : -1, :]
-
-
-def create_one_hot_and_embeddings(tokens, embed_weights, model):
-    one_hot = torch.zeros(
-        tokens.shape[0], embed_weights.shape[0], device=model.device, dtype=embed_weights.dtype
-    )
-    one_hot.scatter_(
-        1,
-        tokens.unsqueeze(1),
-        torch.ones(one_hot.shape[0], 1, device=model.device, dtype=embed_weights.dtype),
-    )
-    embeddings = (one_hot @ embed_weights).unsqueeze(0).data
-    return one_hot, embeddings
-
-
 def run(
     model_path: str,
     num_steps: int = 100,
@@ -190,26 +96,44 @@ def run(
                 print(generated_text)
                 print("============================================== ")
 
-        # Always generate adversarial output
+        # Generate adversarial output
         full_embedding = torch.hstack([embeddings, embeddings_attack + adv_pert])
         generated_tokens = generate(model, full_embedding, num_tokens)
         generated_text = tokenizer.decode(generated_tokens, skip_special_tokens=True)
-        
-        if verbose:
-            print("================== FINAL =====================")
-            print(generated_text)
-            print("============================================== ")
+        perplexity_adv = compute_perplexity(model, tokenizer, generated_text, device)
 
-        # ADDED: Generate output from the original toxic prompt without attack
-        original_input_ids = tokenizer.encode(fixed_prompt + " " + target, return_tensors="pt").to(device)
+        # Generate output from just the original fixed_prompt
+        original_input_ids = tokenizer.encode(fixed_prompt, return_tensors="pt").to(device)
         with torch.no_grad():
             original_output_ids = model.generate(original_input_ids, max_length=original_input_ids.shape[1] + 100)
         original_output = tokenizer.decode(original_output_ids[0], skip_special_tokens=True)
+        perplexity_orig = compute_perplexity(model, tokenizer, original_output, device)
 
-        # ADDED: Log both outputs
+        # Generate output from fixed_prompt + target (for baseline comparison)
+        combined_input_ids = tokenizer.encode(fixed_prompt + " " + target, return_tensors="pt").to(device)
+        with torch.no_grad():
+            combined_output_ids = model.generate(combined_input_ids, max_length=combined_input_ids.shape[1] + 100)
+        combined_output = tokenizer.decode(combined_output_ids[0], skip_special_tokens=True)
+        perplexity_combined = compute_perplexity(model, tokenizer, combined_output, device)
+
+        if verbose:
+            print("================== FINAL =====================")
+            print("Adversarial Output:", generated_text)
+            print("Original Prompt Output:", original_output)
+            print("Prompt + Target Output:", combined_output)
+            print("Adversarial Perplexity:", perplexity_adv)
+            print("Original Perplexity:", perplexity_orig)
+            print("Prompt+Target Perplexity:", perplexity_combined)
+            print("============================================== ")
+
+        # Log all results
         logs[-1].update({
             "adversarial_output": generated_text,
-            "original_prompt_output": original_output
+            "original_prompt_output": original_output,
+            "original_prompt_plus_target_output": combined_output,
+            "adversarial_perplexity": perplexity_adv,
+            "original_perplexity": perplexity_orig,
+            "prompt_plus_target_perplexity": perplexity_combined
         })
 
         n += 1
@@ -220,7 +144,3 @@ def run(
             json.dump(logs, f, indent=2)
 
     return logs
-
-
-if __name__ == "__main__":
-    run()
